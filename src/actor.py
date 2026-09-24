@@ -41,4 +41,6 @@ class Actor(nn.Module):
 		v = self.v_ffn(x) + self.pos_embed
 		attn, _ = self.attn(q, k, v)
 		attn = attn.mean(dim=1)
-		return self.out_ffn(attn).view(*attn.shape[:-1], N, N)
+		w = self.out_ffn(attn).view(*attn.shape[:-1], N, N)
+		eye = torch.eye(N, device=w.device, dtype=w.dtype)
+		return w * (1 - eye)

@@ -1,5 +1,5 @@
 import torch
-from config import m, n, num_neurons, V_threshold, beta
+from config import m, n, num_neurons, V_threshold, beta, synaptic_scale
 
 INPUT_IDX = 0
 OUTPUT_IDX = 1
@@ -22,7 +22,10 @@ class Brain:
 	@torch.no_grad()
 	def set_next_w(self, next_wi):
 		"""Queue actor output to become self.w when the next chunk begins."""
-		self._pending_w = next_wi.detach().clone()
+		w = next_wi.detach().clone()
+		idx = torch.arange(w.shape[-1], device=w.device)
+		w[..., idx, idx] = 0
+		self._pending_w = w
 
 	@torch.no_grad()
 	def step(self):
@@ -45,7 +48,7 @@ class Brain:
 
 		self.last_spike = self.v >= V_threshold
 		# w[i, j] = weight from j -> i (incoming to i)
-		self.v = beta * self.v + self.w @ self.last_spike.float()
+		self.v = beta * self.v + synaptic_scale * (self.w @ self.last_spike.float())
 
 		# Hard-reset hidden neurons only (not input, not output).
 		reset = self.last_spike.clone()

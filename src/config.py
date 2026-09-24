@@ -7,11 +7,13 @@ num_neurons = 10
 V_threshold = 1
 beta = 0.98         # LIF leak (higher → slower leak, more spikes)
 alpha = 0.98        # output spike EMA decay
+# scale W@spike so one strong synapse can't always clear threshold alone
+synaptic_scale = 1
 
 # input neuron fires ~ Bernoulli(input_rate) each frame
 input_rate = 0.5
 
-# reward f(x) = (a0 + a1 x + a2 x^2 + a3 x^3)/8 + 0.5, x in (-1, 1)
+# cubic raw(x)=a0+a1*x+a2*x^2+a3*x^3, then affine-normalized to [0,1] on [-1,1]
 # initial coeffs; resampled uniformly in [-1, 1] every reward_switch_chunks
 a0 = 0.0
 a1 = 1.0
@@ -31,6 +33,7 @@ sigma_decay = 10_000  # chunks until sigma reaches sigma_final
 
 actor_lr = 1e-4
 critic_lr = 1e-3
+actor_delay = 2
 warmup_chunks = 64
 train_chunks = 5_000
 updates_per_chunk = 1

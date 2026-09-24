@@ -21,17 +21,18 @@ class Critic(nn.Module):
 		)
 		self.attn = nn.MultiheadAttention(embed_dim=h, num_heads=4, batch_first=True)
 		self.out_ffn = nn.Sequential(
-			nn.Linear(h, h),
+			nn.Linear(h + 1, h),
 			nn.LeakyReLU(),
 			nn.Linear(h, h),
 			nn.LeakyReLU(),
 			nn.Linear(h, 1),
 		)
 
-	def forward(self, vi, wi, next_wi):
+	def forward(self, vi, wi, next_wi, t):
 		"""
 		vi, wi: (..., n * num_neurons, m) and (..., n * num_neurons, num_neurons)
 		next_wi: proposed next-chunk weights (..., num_neurons, num_neurons)
+		t: episode progress in [0, 1], shape (..., 1)
 		"""
 		N = self.num_neurons
 		# token (c, i) gets incoming row i of the proposed next W
@@ -44,4 +45,6 @@ class Critic(nn.Module):
 		v = self.v_ffn(x) + self.pos_embed
 		attn, _ = self.attn(q, k, v)
 		attn = attn.mean(dim=1)
-		return self.out_ffn(attn)
+		if t.ndim == attn.ndim - 1:
+			t = t.unsqueeze(-1)
+		return self.out_ffn(torch.cat([attn, t], dim=-1))

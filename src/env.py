@@ -1,5 +1,5 @@
 import torch
-from config import V_threshold, alpha, input_rate
+from config import V_threshold, alpha, input_rate, reward_switch_chunks
 from brain import Brain, INPUT_IDX, OUTPUT_IDX
 from reward import RewardModel
 
@@ -16,7 +16,7 @@ class Env:
 		self.brain = Brain()
 		self.reward = reward_model if reward_model is not None else RewardModel()
 		self.output_ema = torch.tensor(0.0)
-		self.spike_frac = torch.tensor(0.0)  # fraction of neurons that spiked this frame
+		self.spike_frac = torch.tensor(0.0)  # hidden-only spike fraction this frame
 		self._chunk_reward_sum = torch.tensor(0.0)
 		self._chunk_spike_sum = torch.tensor(0.0)
 		self._chunk_frames = 0
@@ -39,6 +39,19 @@ class Env:
 		return self
 
 	@torch.no_grad()
+	def episode_frac(self):
+		"""Chunks completed in this landscape, scaled to [0, 1]."""
+		return self.reward.chunks_on_landscape / reward_switch_chunks
+
+	@torch.no_grad()
+	def reset_episode(self):
+		"""Clear neural state between landscapes. Keeps the current reward model."""
+		reward = self.reward
+		self.reset()
+		self.reward = reward
+		return self
+
+	@torch.no_grad()
 	def step(self):
 		"""
 		One frame. Returns (actor_due, chunk_reward).
@@ -49,7 +62,9 @@ class Env:
 
 		actor_due, chunk_ended = self.brain.step()
 
-		self.spike_frac = self.brain.last_spike.float().mean()
+		# Hidden neurons only (exclude hard-set input and readout output).
+		hidden_spikes = self.brain.last_spike[2:].float()
+		self.spike_frac = hidden_spikes.mean() if hidden_spikes.numel() else torch.tensor(0.0)
 		out_spike = self.brain.last_spike[OUTPUT_IDX].float()
 		self.output_ema = alpha * self.output_ema + (1.0 - alpha) * out_spike
 

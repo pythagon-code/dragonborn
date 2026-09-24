@@ -8,6 +8,7 @@ from torchrl.modules import AdditiveGaussianModule
 
 from actor import Actor
 from config import (
+	actor_delay,
 	actor_lr,
 	batch_size,
 	critic_lr,
@@ -58,10 +59,13 @@ def make_noise(dev: torch.device) -> AdditiveGaussianModule:
 def explore_action(actor, noise, vi, wi):
 	action = actor(vi, wi)
 	td = TensorDict({"action": action}, batch_size=action.shape[:-2], device=action.device)
-	return noise(td)["action"]
+	action = noise(td)["action"]
+	idx = torch.arange(action.shape[-1], device=action.device)
+	action[..., idx, idx] = 0
+	return action
 
 
-def ddpg_update(actor, critic, actor_t, critic_t, actor_opt, critic_opt, batch):
+def ddpg_update(actor, critic, actor_t, critic_t, actor_opt, critic_opt, noise, batch, update_actor):
 	vi = batch["vi"]
 	wi = batch["wi"]
 	action = batch["action"]
@@ -69,24 +73,32 @@ def ddpg_update(actor, critic, actor_t, critic_t, actor_opt, critic_opt, batch):
 	next_vi = batch["next_vi"]
 	next_wi = batch["next_wi"]
 
-	with torch.no_grad():
-		next_action = actor_t(next_vi, next_wi)
-		target_q = reward + gamma * critic_t(next_vi, next_wi, next_action)
+	done = batch["done"]
 
-	q = critic(vi, wi, action)
+	t = batch["t"]
+	next_t = batch["next_t"]
+
+	with torch.no_grad():
+		next_action = explore_action(actor_t, noise, next_vi, next_wi)
+		target_q = reward + gamma * (1.0 - done) * critic_t(next_vi, next_wi, next_action, next_t)
+
+	q = critic(vi, wi, action, t)
 	critic_loss = F.mse_loss(q, target_q)
 	critic_opt.zero_grad()
 	critic_loss.backward()
 	critic_opt.step()
 
-	actor_loss = -critic(vi, wi, actor(vi, wi)).mean()
-	actor_opt.zero_grad()
-	actor_loss.backward()
-	actor_opt.step()
+	actor_loss_value = float("nan")
+	if update_actor:
+		actor_loss = -critic(vi, wi, actor(vi, wi), t).mean()
+		actor_opt.zero_grad()
+		actor_loss.backward()
+		actor_opt.step()
+		soft_update(actor_t, actor, tau)
+		actor_loss_value = float(actor_loss.item())
 
-	soft_update(actor_t, actor, tau)
 	soft_update(critic_t, critic, tau)
-	return float(critic_loss.item()), float(actor_loss.item())
+	return float(critic_loss.item()), actor_loss_value
 
 
 def train():
@@ -112,8 +124,10 @@ def train():
 		batch_size=batch_size,
 	)
 
-	pending = None  # (vi, wi, action) waiting for next chunk reward + next state
+	pending = None  # (vi, wi, action, t) waiting for next chunk reward + next state
 	chunks_done = 0
+	critic_updates = 0
+	last_actor_loss = float("nan")
 	log_every = 64  # divides reward_switch_chunks (128)
 
 	while chunks_done < train_chunks:
@@ -121,12 +135,14 @@ def train():
 		if not actor_due:
 			continue
 
+		episode_done = env.reward_switched
 		vi, wi = env.brain.actor_inputs()
 		vi = vi.to(dev)
 		wi = wi.to(dev)
 
 		if pending is not None:
-			p_vi, p_wi, p_action = pending
+			p_vi, p_wi, p_action, p_t = pending
+			next_t = 1.0 if episode_done else env.episode_frac()
 			transition = TensorDict(
 				{
 					"vi": p_vi,
@@ -135,6 +151,9 @@ def train():
 					"reward": chunk_reward.to(dev).view(1),
 					"next_vi": vi,
 					"next_wi": wi,
+					"t": p_t,
+					"next_t": torch.tensor([next_t], device=dev),
+					"done": torch.tensor([1.0 if episode_done else 0.0], device=dev),
 				},
 				batch_size=[],
 				device=dev,
@@ -143,12 +162,16 @@ def train():
 
 			if len(rb) >= warmup_chunks:
 				for _ in range(updates_per_chunk):
+					critic_updates += 1
 					batch = rb.sample()
 					c_loss, a_loss = ddpg_update(
-						actor, critic, actor_t, critic_t, actor_opt, critic_opt, batch
+						actor, critic, actor_t, critic_t, actor_opt, critic_opt, noise, batch,
+						critic_updates % actor_delay == 0,
 					)
+					if a_loss == a_loss:
+						last_actor_loss = a_loss
 			else:
-				c_loss = a_loss = float("nan")
+				c_loss = float("nan")
 
 			r = float(chunk_reward)
 			chunks_done += 1
@@ -161,14 +184,19 @@ def train():
 					f"spike={spike:.4f}  "
 					f"sigma={float(noise.sigma):.4f}  "
 					f"buffer={len(rb)}  "
-					f"c_loss={c_loss:.4f}  a_loss={a_loss:.4f}"
+					f"c_loss={c_loss:.4f}  a_loss={last_actor_loss:.4f}"
 				)
 
+
+		if episode_done:
+			env.reset_episode()
+			pending = None
+			continue
 
 		action = explore_action(actor, noise, vi.unsqueeze(0), wi.unsqueeze(0)).squeeze(0)
 		env.brain.set_next_w(action.cpu())
 		noise.step(1)
-		pending = (vi, wi, action.detach())
+		pending = (vi, wi, action.detach(), torch.tensor([env.episode_frac()], device=dev))
 
 	return actor, critic
 
